@@ -1,0 +1,410 @@
+---
+title: "Recommender System"
+author: "Simon Lizarazo - Tina Wu"
+date: "2023-12-04"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+---
+
+## Members
+
+-   Simon Lizarazo, UIN 663350240 - STAT 542 A1 Fall 2023 CRN50222
+
+-   Tina Wu - UIN 664024879 - STAT 542 A1 Fall 2023 CRN50222
+
+Simon and Tina worked together throughout the project. They both contributed to the develpment of this document as well as the development of the app.
+
+-   Link for the app <https://sleezch.shinyapps.io/movie_recommender/>
+
+## Libraries
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library(stringr)
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(data.table)
+library(DT)
+library(recommenderlab)
+```
+
+## Datasets
+
+This part of the code was obtained from [`https://liangfgithub.github.io/Rcode_W13_Movie_EDA.nb.html`](https://liangfgithub.github.io/Rcode_W13_Movie_EDA.nb.html)
+
+```{r message=FALSE, warning=FALSE}
+
+url = 'https://liangfgithub.github.io/MovieData/'
+
+## Ratings Dataset
+ratings = read.csv(paste0(url, 'ratings.dat?raw=true'), sep = ':', colClasses = c('integer', 'NULL'), header = F)
+
+colnames(ratings) = c('user', 'movie', 'rating', 'timestamp')
+head(ratings)
+
+## Movies Dataset
+movies = readLines(paste0(url, 'movies.dat?raw=true'))
+movies = strsplit(movies, split = "::", fixed = TRUE, useBytes = TRUE)
+movies = matrix(unlist(movies), ncol = 3, byrow = TRUE)
+movies = data.frame(movies, stringsAsFactors = FALSE)
+colnames(movies) = c('MovieID', 'Title', 'Genres')
+movies$MovieID = as.character(movies$MovieID)
+movies$Title = iconv(movies$Title, "latin1", "UTF-8")
+movies$Year = as.numeric(unlist(lapply(movies$Title, function(x) substr(x, nchar(x)-4, nchar(x)-1))))
+head(movies)
+                                         
+## User Data
+users = read.csv(paste0(url, 'users.dat?raw=true'),
+                 sep = ':', header = FALSE)
+users = users[, -c(2,4,6,8)] # skip columns
+colnames(users) = c('UserID', 'Gender', 'Age', 'Occupation', 'Zip-code')
+head(users)
+                     
+```
+
+\-- For each movie, we will add it's respective image
+
+```{r message=FALSE, warning=FALSE}
+image_url = "https://liangfgithub.github.io/MovieImages/"
+
+movies = movies |> mutate(image_link = paste0(image_url, 
+                        MovieID, 
+                        '.jpg?raw=true'))
+```
+
+\-- For each genre we create a binary system
+
+```{r message=FALSE, warning=FALSE}
+genres = as.data.frame(movies$Genres, stringsAsFactors=FALSE)
+tmp = as.data.frame(tstrsplit(genres[,1], '[|]',
+                              type.convert=TRUE),
+                    stringsAsFactors=FALSE)
+genre_list = c("Action", "Adventure", "Animation", 
+               "Children's", "Comedy", "Crime",
+               "Documentary", "Drama", "Fantasy",
+               "Film-Noir", "Horror", "Musical", 
+               "Mystery", "Romance", "Sci-Fi", 
+               "Thriller", "War", "Western")
+m = length(genre_list)
+genre_matrix = matrix(0, nrow(movies), length(genre_list))
+for(i in 1:nrow(tmp)){
+  genre_matrix[i,genre_list %in% tmp[i,]]=1
+}
+colnames(genre_matrix) = genre_list
+remove("tmp", "genres")
+head(cbind(movies, genre_matrix))
+```
+
+## System I - Recommendation Based on Genres
+
+### Recommendation based on popularity
+
+For this method, the user needs to choose genres that they are interested in. The recommender will provide the top n movies with the highest rating (Average) accounting for the total number of users that have provided a rating, this number needs to be higher than.
+
+\-- A Brief summary:
+
+1.  The user can provide a total number of recommendations they want along with the genres they are interested in.
+2.  There are two functions that help achieving this goal:
+    1.  `movies_list` : It provides the list of movies IDs associated with the requested genre. Before selecting the movies it summarizes the rating for a movie as the mean, and the number of reviews based on the total number of users that review a specific film.
+        -   Furthermore it calculates a review score, which is equal to a normalized number of reviews times normalized rating.
+            -   The normalization is merely calculated by dividing each column by its maximum value.
+    2.  `top_n_movies`: It provides the list of movies suggested by each category based on the total number of recommendation needed. This function uses the `movie_list` function and selects the number of recommendations based on the score (mentioned above)
+
+[**NOTE:** Given that selection is based on a score calculated, the list of movies returned can vary depending the total number of recommendations required this can be understood as follow: (This table is fictitious)]{.underline}
+
+| Movie_ID | Score | Rating | Top 5   | Top 10  |
+|----------|-------|--------|---------|---------|
+| 1        | 0.5   | 4.1    | **YES** | **YES** |
+| 4        | 0.39  | 4.2    | **YES** | **YES** |
+| 7        | 0.37  | 3.6    | **YES** | **YES** |
+| 46       | 0.38  | 3.8    | **YES** | **YES** |
+| 667      | 0.25  | 3.8    | **YES** | **YES** |
+| 999      | 0.24  | 3.7    | NO      | **YES** |
+| 1007     | 0.23  | 3.7    | NO      | **YES** |
+| 1234     | 0.21  | 3.6    | NO      | **YES** |
+| 2002     | 0.19  | 4.5    | NO      | **YES** |
+| 2300     | 0.18  | 4.2    | NO      | **YES** |
+
+-   For example, if the user wants to see the first top 5 movies from X Genre, he will get the movies shown in the following order:
+
+| Movie ID | Rating |
+|----------|--------|
+| 4        | 4.2    |
+| 1        | 4.1    |
+| 46       | 3.8    |
+| 667      | 3.8    |
+| 7        | 3.6    |
+
+-   But if the user wants to see the first top 10 movies, the order will be different based on the selection criteria. **Recall that we are accounting for the total number of reviews a movie get and its mean rating**
+
+| Movie_ID (Sorted_By_Rating) | Rating | Movie_ID (Sorted_By_Score) | Score |
+|-----------------------------|--------|----------------------------|-------|
+| 2002                        | 4.5    | 1                          | 0.5   |
+| 4                           | 4.2    | 4                          | 0.39  |
+| 2300                        | 4.2    | 7                          | 0.37  |
+| 1                           | 4.1    | 46                         | 0.38  |
+| 46                          | 3.8    | 667                        | 0.25  |
+| 667                         | 3.8    | 999                        | 0.24  |
+| 999                         | 3.7    | 1007                       | 0.23  |
+| 1007                        | 3.7    | 1234                       | 0.21  |
+| 7                           | 3.6    | 2002                       | 0.19  |
+| 1234                        | 3.6    | 2300                       | 0.18  |
+
+```{r message=FALSE, warning=FALSE}
+## Let's create some functions
+movies_list = function(genre){
+  if(length(genre) == 1){
+  a = which(colnames(genre_matrix) == genre)
+  moviesa = genre_matrix |> as.data.frame()
+  moviesa = moviesa[,a] |> as.data.frame()
+  colnames(moviesa) = genre
+  } else {
+  moviesa = genre_matrix[,genre] |> as.data.frame()  }
+  moviesa$ID = movies$MovieID
+  moviesa = moviesa |> pivot_longer(!ID, names_to = 'Genre', values_to = 'Class') 
+  moviesa = moviesa |> filter(Class == 1)
+
+  ratings_movies = ratings |> group_by(movie) |>
+    summarize(total_ratings = n(),
+              average_rate = round(mean(rating), dig = 4)) 
+  ratings_movies = ratings_movies |> mutate(score = (total_ratings/max(total_ratings))*average_rate/5)
+  ratings_movies$movie = as.character(ratings_movies$movie)
+  moviesa = moviesa |> left_join(ratings_movies, join_by('ID' == 'movie'))
+  moviesa = moviesa |> replace(is.na(moviesa), 0)
+  return(moviesa)
+}
+
+top_n_movies = function(ntop, genre){
+  movies_chosen = movies_list(genre)
+  
+  movies_chosen = movies_chosen |> group_by(Genre) |>
+    top_n(ntop, score)
+  
+  movies$MovieID = as.character(movies$MovieID)
+  
+  movies_chosen = movies_chosen |> left_join(movies, join_by('ID' == 'MovieID'))
+  
+  movies_chosen = movies_chosen |> select(ID, Genre, average_rate, Title, image_link)
+  
+  movies_chosen = movies_chosen |> mutate(Poster = paste0("<img src=", image_link, "></img>"), Rating = round(average_rate, 1)) |>
+    select(Genre, Title, Poster, Rating)
+  
+  movies_chosen = movies_chosen |> group_by(Genre) |> arrange((Genre),desc(Rating)) |> datatable(class = "nowrap hover row-border", escape = FALSE,
+            options = list(dom = 't', scrollX = TRUE, autoWidth = FALSE))
+  
+  return(movies_chosen)
+  
+}
+
+```
+
+#### Example
+
+```{r message=FALSE, warning=FALSE}
+# With one genre
+top_n_movies(5, genre = c('Animation'))
+
+# With two genre
+top_n_movies(5, genre = c('Animation', 'Horror'))
+```
+
+## System II - Recommendation Based on IBCF
+
+It is needed to be able to differentiate movie ID and user ID. Therefore we will add a string to the User and the Movie in the rating dataframe. Then we transform our ratings data frame into a dataframe where columns are movies and rows are users
+
+```{r message=FALSE, warning=FALSE}
+i = paste0('us_', ratings$user)
+j = paste0('mov_', ratings$movie)
+
+## Movie User Matrix
+x = ratings$rating
+tmp = data.frame(i, j, x, stringsAsFactors = T)
+
+mat = sparseMatrix(as.integer(tmp$i), as.integer(tmp$j), x = tmp$x)
+
+rownames(mat) = levels(tmp$i)
+colnames(mat) = levels(tmp$j)
+
+mat = new('realRatingMatrix', data = mat)
+```
+
+### Steps to follow
+
+1.  Normalization
+
+    ```{r message=FALSE, warning=FALSE}
+    mat = as(mat, 'matrix')
+    user.means = rowMeans(mat, na.rm = T)
+    ## Substracting means
+    new_mat = mat - user.means
+    ## User.Means
+    head(user.means)
+    ```
+
+2.  Cosine Similarity
+
+    ```{r message=FALSE, warning=FALSE}
+    library(coop)
+    D = coop::cosine(new_mat, use = 'pairwise.complete.obs')
+
+    diag(D) = NA
+
+    mock = new_mat
+    mock[is.na(mock)] = 0 
+    mock[mock != 0] = 1
+
+    for(i in 1:(ncol(mock) - 1)){
+      
+      for(j in (i + 1):ncol(mock)){
+        test = t(mock[,i])%*% mock[,j]
+        if(test < 3){
+          D[i,j] = NA
+          D[j,i] = NA
+        } else{
+          next
+        }
+      }
+    }
+
+    D1 = (1+D)/2
+    ```
+
+    ```{r}
+    D1[c('mov_1', 'mov_10', 'mov_100', 'mov_1510', 'mov_260', 'mov_3212'), c('mov_1', 'mov_10', 'mov_100', 'mov_1510', 'mov_260', 'mov_3212')]
+    ```
+
+3.  Sorting and selecting the top 30.
+
+    ```{r message=FALSE, warning=FALSE}
+    sort_S = D1
+
+
+    for(i in 1:ncol(sort_S)){
+      sorted = tail(order(sort_S[i,], decreasing = F, na.last = F), 30)
+      sort_S[i, -sorted] = NA
+    }
+
+
+    ## Pairwise similarity for movie 1, 10, 100, 1510, 260, 3212, after filtering
+    sort_S[c('mov_1', 'mov_10', 'mov_100', 'mov_1510', 'mov_260', 'mov_3212'), c('mov_1', 'mov_10', 'mov_100', 'mov_1510', 'mov_260', 'mov_3212')]
+
+    write.table(sort_S, 'movies_recommendation.csv', row.names = T, col.names = T, na = '' , sep = ',')
+
+    ### rated movies only top movies
+    ratings_movies = ratings |> group_by(movie) |>
+    summarize(total_ratings = n(),
+              average_rate = round(mean(rating), dig = 4)) 
+
+    ratings_movies = ratings_movies |> filter(average_rate > 4)
+
+    write.table(ratings_movies, 'top_rated_movies.csv', row.names = T, col.names = T, na = '', sep = ',')
+
+    ```
+
+4.  ICBF function
+
+Returns the top 10 movies based on the ratings provided by an user.
+
+In case that there are not enough movies to recommend, the function, will consider the list of movies rated and its respective average and suggest movies from that large pool (Top Movies). It will not recommend the same movie twice.
+
+```{r message=FALSE, warning=FALSE}
+myICBF = function(newuser){
+
+  url = "https://github.com/slizarazo21/STAT542_StatisticalLearning/raw/main/movies_recommendation.csv"
+  
+  sort_S = read.csv(url)
+  
+  indicator = which(!is.na(newuser))
+  ## Weighted sum of the user rated movies
+  numerator = colSums(t(sort_S[,indicator]) *
+                        newuser[indicator], na.rm = T)
+  denominator = rowSums(sort_S[,indicator], na.rm = T)
+  
+  pred = numerator/denominator
+  
+  ## Tuning up the predictions
+  pred[is.infinite(pred)] = NA
+  pred[is.nan(pred)] = NA
+  pred[!is.na(newuser)] = NA
+
+  pred = pred[order(pred, decreasing = T)]
+  
+  pred = pred |> as.data.frame() |> top_n(10)
+  
+  pred$movies = row.names(pred)
+  pred$movies = gsub('mov_', '', pred$movies)
+  colnames(pred)[1] = 'Rating'
+  
+  if(sum(is.na(pred)) > 1){
+    url2 = 'https://github.com/slizarazo21/STAT542_StatisticalLearning/raw/main/top_rated_movies.csv'
+    
+    top_mov = read.csv(url2)
+    
+    top_mov = top_mov |> select(1,3) |> filter(average_rate > 4.2) |> top_n(20)
+    colnames(top_mov) = c('Rating', 'movies')
+    
+    pred = rbind(pred, top_mov) |> distinct() |> top_n(10)
+    
+  } else { 
+    pred = pred
+  
+  }
+  movies$MovieID = as.character(movies$MovieID)
+  
+  movies_chosen = pred
+  
+  movies_chosen = movies_chosen |> left_join(movies, join_by('movies' == 'MovieID'))
+  
+  movies_chosen = movies_chosen |> select(movies, Genres, Rating, Title, image_link)
+  
+  colnames(movies_chosen)[1] = 'ID'
+  
+  movies_chosen = movies_chosen |> mutate(Poster = paste0("<img src=", image_link, "></img>"), Rating = round(Rating, 1)) |>
+select(ID, Genres, Title, Poster, Rating)
+  
+  movies_chosen = movies_chosen |> top_n(10)
+  
+  movies_chosen = movies_chosen |> datatable(class = "nowrap hover row-border", escape = FALSE,
+        options = list(dom = 't', scrollX = TRUE, autoWidth = FALSE))
+  
+  return(movies_chosen)
+  
+}
+```
+
+### Proving the function
+
+1.  User 1181
+
+```{r message=FALSE, warning=FALSE}
+newuser = mat['us_1181',]
+
+myICBF(newuser)
+```
+
+2.  User 1351
+
+```{r message=FALSE, warning=FALSE}
+newuser = mat['us_1351',]
+
+myICBF(newuser)
+```
+
+3.  Hypothetical User
+
+```{r message=FALSE, warning=FALSE}
+hypothetical <- setNames(rep(NA, length(colnames(mat))), colnames(mat))
+hypothetical["mov_1613"] <- 5
+hypothetical["mov_1755"] <- 4
+
+myICBF(hypothetical)
+```
